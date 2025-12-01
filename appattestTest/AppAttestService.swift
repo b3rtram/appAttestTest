@@ -10,12 +10,12 @@ import DeviceCheck
 import CryptoKit
 import Combine
 
-/// Service-Klasse für App Attest - generiert Attestierungen und Assertionen
+/// Service class for App Attest - generates attestations and assertions
 @MainActor
 class AppAttestService: ObservableObject {
     
     // MARK: - Published Properties
-    @Published var status: String = "Bereit"
+    @Published var status: String = "Ready"
     @Published var keyId: String?
     @Published var isAttested: Bool = false
     
@@ -25,46 +25,46 @@ class AppAttestService: ObservableObject {
     
     // MARK: - Initialization
     init() {
-        // Prüfe ob App Attest verfügbar ist
+        // Check if App Attest is available
         checkAvailability()
         
-        // Lade gespeicherte Key ID falls vorhanden
+        // Load saved key ID if available
         loadKeyId()
     }
     
     // MARK: - Availability Check
     private func checkAvailability() {
         if service.isSupported {
-            status = "App Attest wird unterstützt"
+            status = "App Attest is supported"
         } else {
-            status = "App Attest wird NICHT unterstützt"
+            status = "App Attest is NOT supported"
         }
     }
     
     // MARK: - Key Management
     
-    /// Lädt die gespeicherte Key ID aus UserDefaults
+    /// Loads the saved key ID from UserDefaults
     private func loadKeyId() {
         if let savedKeyId = UserDefaults.standard.string(forKey: keyIdKey) {
             self.keyId = savedKeyId
             self.isAttested = true
-            status = "Bestehender Key geladen"
+            status = "Existing key loaded"
         }
     }
     
-    /// Speichert die Key ID in UserDefaults
+    /// Saves the key ID to UserDefaults
     private func saveKeyId(_ keyId: String) {
         UserDefaults.standard.set(keyId, forKey: keyIdKey)
         self.keyId = keyId
         self.isAttested = true
     }
     
-    /// Löscht die gespeicherte Key ID (für Tests)
+    /// Deletes the saved key ID (for testing)
     func resetAttestation() {
         UserDefaults.standard.removeObject(forKey: keyIdKey)
         self.keyId = nil
         self.isAttested = false
-        status = "Attestierung zurückgesetzt"
+        status = "Attestation reset"
     }
     
     // MARK: - Attestation
@@ -88,11 +88,27 @@ class AppAttestService: ObservableObject {
         print("   Länge: \(keyId.count) Zeichen")
         status = "Key ID generiert: \(keyId.prefix(8))..."
        
-        // WICHTIG: Der Public Key ist im Attestation-Objekt enthalten!
-        // App Attest Keys können nicht direkt über die Keychain abgerufen werden.
-        // Der Public Key wird im attestation statement eingebettet sein.
-        
-        // https://stackoverflow.com/questions/63186792/using-the-private-key-generated-by-dcappattestservice
+        // Schlüssel aus Secure Enclave abrufen und Public Key extrahieren
+        let privateKey = try SecureEnclaveService.shared.retrievePrivateKey(withTag: keyId)
+        if let publicKeyData = SecureEnclaveService.shared.getPublicKeyRepresentation(from: privateKey) {
+            print("🔓 Public Key Details:")
+            print("   Größe: \(publicKeyData.count) Bytes")
+            print("   Hex: \(publicKeyData.map { String(format: "%02x", $0) }.joined())")
+            print("   Base64: \(publicKeyData.base64EncodedString())")
+            
+            // Public Key im X9.63 Format (für P-256):
+            // Byte 0: 0x04 (unkomprimiert)
+            // Bytes 1-32: X-Koordinate
+            // Bytes 33-64: Y-Koordinate
+            if publicKeyData.count == 65 && publicKeyData[0] == 0x04 {
+                let xCoord = publicKeyData[1...32]
+                let yCoord = publicKeyData[33...64]
+                print("   X-Koordinate: \(xCoord.map { String(format: "%02x", $0) }.joined())")
+                print("   Y-Koordinate: \(yCoord.map { String(format: "%02x", $0) }.joined())")
+            }
+        } else {
+            print("⚠️  Public Key konnte nicht extrahiert werden")
+        }
         
         // Schritt 2: Hash des Challenge-Strings berechnen
         guard let challengeData = Data(base64Encoded: serverChallenge) else {
@@ -119,15 +135,7 @@ class AppAttestService: ObservableObject {
         print("   Base64 (erste 100 Zeichen): \(attestation.base64EncodedString().prefix(100))...")
         print("   Base64 (vollständig): \(attestation.base64EncodedString())")
         
-        // Schritt 4: Public Key aus Attestation extrahieren (optional)
-        if let publicKeyData = extractPublicKey(from: attestation) {
-            print("🔓 Public Key aus Attestation extrahiert:")
-            print("   Größe: \(publicKeyData.count) Bytes")
-            print("   Hex: \(publicKeyData.map { String(format: "%02x", $0) }.joined())")
-            print("   Base64: \(publicKeyData.base64EncodedString())")
-        }
-        
-        // Schritt 5: Key ID speichern
+        // Schritt 4: Key ID speichern
         saveKeyId(keyId)
         status = "Attestierung erfolgreich generiert!"
         print("💾 Key ID gespeichert in UserDefaults")
@@ -138,38 +146,6 @@ class AppAttestService: ObservableObject {
             attestation: attestation,
             challenge: serverChallenge
         )
-    }
-    
-    // MARK: - Helper Methods
-    
-    /// Extrahiert den Public Key aus einem App Attest Attestation-Objekt
-    /// Das Attestation-Objekt ist ein CBOR-kodiertes Objekt im Apple-spezifischen Format
-    /// - Parameter attestation: Das Attestation-Objekt
-    /// - Returns: Der Public Key als Data, falls gefunden
-    private func extractPublicKey(from attestation: Data) -> Data? {
-        // Das Attestation-Objekt enthält den Public Key in einem verschachtelten CBOR-Format
-        // Für eine vollständige Extraktion wäre ein CBOR-Parser notwendig
-        // Dies ist eine vereinfachte Version für Debugging-Zwecke
-        
-        // Der Public Key (P-256, 65 Bytes im X9.63 Format) ist irgendwo im Attestation eingebettet
-        // Suche nach dem typischen Pattern: 0x04 gefolgt von 64 Bytes (X und Y Koordinaten)
-        
-        let bytes = [UInt8](attestation)
-        for i in 0..<(bytes.count - 65) {
-            if bytes[i] == 0x04 {
-                // Prüfe ob die nächsten 64 Bytes plausibel aussehen
-                let potentialKey = attestation.subdata(in: i..<(i + 65))
-                // Eine einfache Heuristik: Der Key sollte nicht nur aus Nullen bestehen
-                let nonZeroCount = potentialKey.filter { $0 != 0 }.count
-                if nonZeroCount > 32 {  // Mindestens die Hälfte sollte nicht-null sein
-                    return potentialKey
-                }
-            }
-        }
-        
-        print("⚠️  Public Key konnte nicht aus Attestation extrahiert werden")
-        print("   Hinweis: Verwende einen CBOR-Parser für vollständige Extraktion")
-        return nil
     }
     
     // MARK: - Assertion
